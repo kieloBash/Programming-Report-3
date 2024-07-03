@@ -55,11 +55,14 @@ public class MasterServer {
 
                 // Create and add a new slave computer to the list
                 SlaveComputer newSlave = new SlaveComputer(slaveAddress, slavePort);
-                System.out.println("NEW SLAVE - (Address,Port) (" + newSlave.getAddress() + "," + newSlave.getPort() + ")");
-                System.out.println("NUMBER OF SLAVES LISTENING: " + (SLAVES.size() + 1));
-                System.out.println("-------------------------------------");
+                if(!SLAVES.contains(newSlave)){
+                    System.out.println("NEW SLAVE - (Address,Port) (" + newSlave.getAddress() + "," + newSlave.getPort() + ")");
+                    System.out.println("NUMBER OF SLAVES LISTENING: " + (SLAVES.size() + 1));
+                    System.out.println("-------------------------------------");
 
-                SLAVES.add(newSlave);
+                    SLAVES.add(newSlave);
+                }
+
             }
         } catch (IOException ex) {
             System.err.println("Master Server encountered an error: " + ex.getMessage());
@@ -84,7 +87,8 @@ public class MasterServer {
                 startPoint++;
             }
 
-            // If no slaves are connected, process locally
+            int totalParticipants = SLAVES.size() + 1; // Including master
+
             if (SLAVES.isEmpty()) {
                 System.out.println("No Slaves connected!");
 
@@ -117,10 +121,19 @@ public class MasterServer {
                 }
 
             } else {
-                // If slaves are connected, distribute tasks to slaves
+                // Prepare master task
+                ExecutorService masterExecutor = Executors.newFixedThreadPool(nThreads);
+                List<Integer> primes = new ArrayList<>();
+                Lock primesLock = new ReentrantLock();
+
+                for (int num = startPoint; num <= endPoint; num += (2 * totalParticipants)) {
+                    masterExecutor.submit(new PrimeTask(num, primes, primesLock));
+                }
+
+                // Prepare slave tasks
                 for (int i = 0; i < SLAVES.size(); i++) {
                     SlaveComputer currentSlave = SLAVES.get(i);
-                    int finalI = i;
+                    int finalI = i + 1;
                     int finalStartPoint = startPoint;
 
                     futures.add(SLAVE_EXECUTOR.submit(() -> {
@@ -129,7 +142,7 @@ public class MasterServer {
                             DataInputStream slaveDis = new DataInputStream(slaveSocket.getInputStream());
 
                             slaveDos.writeInt(nThreads);
-                            for (int num = finalStartPoint + (2 * finalI); num <= endPoint; num += (2 * SLAVES.size())) {
+                            for (int num = finalStartPoint + (2 * finalI); num <= endPoint; num += (2 * totalParticipants)) {
                                 slaveDos.writeInt(num);
                             }
                             slaveDos.writeInt(-1);
@@ -142,7 +155,14 @@ public class MasterServer {
                     }));
                 }
 
-                // Wait for all futures to complete
+                masterExecutor.shutdown();
+                while (!masterExecutor.isTerminated()) {
+                    // Wait for all master tasks to finish
+                }
+
+                totalPrimes.addAndGet(primes.size());
+
+                // Wait for all slave futures to complete
                 for (Future<?> future : futures) {
                     try {
                         future.get();
