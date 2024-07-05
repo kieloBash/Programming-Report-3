@@ -1,5 +1,7 @@
 import java.io.*;
-import java.net.*;
+import java.net.BindException;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -8,7 +10,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class SlaveServer {
-    // Constants
     private static final String DEFAULT_MASTER_ADDRESS = "localhost";
     private static final int MASTER_PORT = 5001;
     private static final int DEFAULT_SLAVE_SERVICE_PORT = 5003;
@@ -22,18 +23,83 @@ public class SlaveServer {
         defaultMasterAddress = config.masterAddress;
         defaultSlaveServicePort = config.slaveServicePort;
 
-        System.out.println("masterAddress: " + defaultMasterAddress);
-        System.out.println("slaveServicePort: " + defaultSlaveServicePort);
+        System.out.println("Master Address: " + defaultMasterAddress);
+        System.out.println("Slave Service Port: " + defaultSlaveServicePort);
 
-        if (!masterConnection(defaultMasterAddress, defaultSlaveServicePort)) {
+        if (!connectToMaster(defaultMasterAddress, defaultSlaveServicePort)) {
             System.err.println("Failed to connect to the MasterServer. Exiting...");
             System.exit(1);
         }
 
-        taskListener(defaultSlaveServicePort);
+        startTaskListener(defaultSlaveServicePort);
     }
 
-    // Process command-line arguments for custom parameters
+    private static void startTaskListener(int slaveServicePort) {
+        try (ServerSocket serverSocket = new ServerSocket(slaveServicePort)) {
+            System.out.println("Listening for tasks from MasterServer on port " + slaveServicePort);
+
+            while (true) {
+                Socket masterSocket = serverSocket.accept();
+                System.out.println("Connected to MasterServer for a task.");
+                handleTask(masterSocket);
+            }
+        } catch (BindException e) {
+            System.err.println("Port " + slaveServicePort + " is already in use. Please choose a different port.");
+            e.printStackTrace();
+        } catch (IOException ex) {
+            System.err.println("Failed to listen on port " + slaveServicePort + ": " + ex.getMessage());
+            ex.printStackTrace();
+        }
+    }
+
+    private static void handleTask(Socket masterSocket) {
+        try (DataInputStream dis = new DataInputStream(masterSocket.getInputStream());
+             DataOutputStream dos = new DataOutputStream(masterSocket.getOutputStream())) {
+
+            int numThreads = dis.readInt();
+            if (numThreads <= 0) {
+                throw new IllegalArgumentException("Number of threads must be greater than 0.");
+            }
+
+            List<Integer> primes = new ArrayList<>();
+            ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+
+            int num = dis.readInt();
+            int start = dis.readInt();
+            executor.submit(new PrimeTask(num, primes, start));
+            awaitTaskCompletion(executor);
+
+            int primeCount = primes.size();
+            //System.out.println("primes ni slave= "+primes);
+            dos.writeInt(primeCount);
+        } catch (EOFException e) {
+            System.err.println("Connection terminated unexpectedly by the MasterServer.");
+            e.printStackTrace();
+        } catch (IOException ex) {
+            System.err.println("Failed to handle task from master: An error occurred with the MasterServer connection.");
+            ex.printStackTrace();
+        } catch (IllegalArgumentException e) {
+            System.err.println("Invalid input: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private static boolean connectToMaster(String masterAddress, int listeningPort) {
+        System.out.println("Attempting to connect to MasterServer...");
+        try (Socket socket = new Socket(masterAddress, MASTER_PORT);
+             PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+
+            out.println(listeningPort);
+            System.out.println("Successfully connected to MasterServer.");
+            return true;
+
+        } catch (IOException e) {
+            System.err.println("Failed to connect to MasterServer (" + masterAddress + ":" + MASTER_PORT + "). Exiting...");
+            e.printStackTrace();
+        }
+        return false;
+    }
+
     private static ServerConfiguration processArguments(String[] args, int defaultSlaveServicePort) {
         String defaultMasterAddress = DEFAULT_MASTER_ADDRESS;
         int slaveServicePort = defaultSlaveServicePort;
@@ -58,98 +124,6 @@ public class SlaveServer {
         return new ServerConfiguration(defaultMasterAddress, slaveServicePort);
     }
 
-    // Connect to the MasterServer
-    private static boolean masterConnection(String masterAddress, int listeningPort) {
-        System.out.println("Attempting to connect to MasterServer...");
-        Socket socket = null;
-        PrintWriter out = null;
-
-        try {
-
-            socket = new Socket(masterAddress, MASTER_PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-
-            out.println(listeningPort);
-            System.out.println("Successfully connected to MasterServer.");
-            return true;
-        } catch (UnknownHostException e) {
-            System.err.println("Unknown host: " + masterAddress);
-            e.printStackTrace();
-        } catch (IOException e) {
-            System.err.println("I/O error while connecting to MasterServer (" + masterAddress + ":" + MASTER_PORT + "). Exiting...");
-            e.printStackTrace();
-        } finally {
-            try {
-                if (out != null) out.close();
-                if (socket != null) socket.close();
-            } catch (IOException e) {
-                System.err.println("Failed to close socket or output stream: " + e.getMessage());
-                e.printStackTrace();
-            }
-        }
-        return false;
-    }
-
-    // Listen for tasks from the MasterServer
-    private static void taskListener(int slaveServicePort) {
-        try (ServerSocket serverSocket = new ServerSocket(slaveServicePort)) {
-            System.out.println("Listening for tasks from MasterServer on port " + slaveServicePort);
-
-            while (true) {
-                Socket masterSocket = serverSocket.accept();
-                System.out.println("Connected to MasterServer for a task.");
-                taskHandler(masterSocket);
-            }
-        } catch (BindException e) {
-            System.err.println("Port " + slaveServicePort + " is already in use. Please choose a different port.");
-            e.printStackTrace();
-        } catch (IOException ex) {
-            System.err.println("Failed to listen on port " + slaveServicePort + ": " + ex.getMessage());
-            ex.printStackTrace();
-        }
-    }
-
-    // Handle task received from MasterServer
-    private static void taskHandler(Socket masterSocket) {
-        try (DataInputStream dis = new DataInputStream(masterSocket.getInputStream());
-             DataOutputStream dos = new DataOutputStream(masterSocket.getOutputStream())) {
-
-            int nThreads = dis.readInt();
-            if (nThreads <= 0) {
-                throw new IllegalArgumentException("Number of threads must be greater than 0.");
-            }
-
-            List<Integer> primes = new ArrayList<>();
-            Lock primesLock = new ReentrantLock();
-            ExecutorService executor = Executors.newFixedThreadPool(nThreads);
-
-            int num;
-            while ((num = dis.readInt()) != -1) {
-                if (num <= 0) {
-                    System.err.println("Invalid number: " + num);
-                    continue;
-                }
-                executor.submit(new PrimeTask(num, primes, primesLock));
-            }
-
-            awaitTaskCompletion(executor);
-
-            int primeCount = primes.size();
-            System.out.println("Successfully calculated " + primeCount + " primes. Sending result to MasterServer.");
-            dos.writeInt(primeCount);
-        } catch (EOFException e) {
-            System.err.println("Connection terminated unexpectedly by the MasterServer.");
-            e.printStackTrace();
-        } catch (IOException ex) {
-            System.err.println("Failed to handle task from master: An error occurred with the MasterServer connection.");
-            ex.printStackTrace();
-        } catch (IllegalArgumentException e) {
-            System.err.println("Invalid input: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    // Await task completion by shutting down the executor and waiting for termination
     private static void awaitTaskCompletion(ExecutorService executor) {
         executor.shutdown();
         while (!executor.isTerminated()) {
@@ -171,32 +145,35 @@ public class SlaveServer {
     // Runnable task to determine if a number is prime
     static class PrimeTask implements Runnable {
         private final List<Integer> primes;
-        private final Lock lock;
-        private final int num;
+        private final int start;
+        private final int end;
 
-        PrimeTask(int num, List<Integer> primes, Lock lock) {
-            this.num = num;
+        PrimeTask(int start, List<Integer> primes, int end) {
+            this.start = start;
             this.primes = primes;
-            this.lock = lock;
+            this.end = end;
         }
 
         @Override
         public void run() {
-            if (isPrime(num)) {
-                lock.lock();
-                try {
-                    primes.add(num);
-                } finally {
-                    lock.unlock();
+            for (int i = start; i <= end; i++) {
+                //System.out.println("slave processing:  "+ i);
+                if (isPrime(i)) {
+                    synchronized (primes) {
+                        primes.add(i);
+                    }
                 }
             }
         }
 
         // Check if a number is prime
         private boolean isPrime(int n) {
+            //System.out.println("n = "+ n);
             if (n <= 1) return false;
-            for (int i = 2; i * i <= n; i++) {
-                if (n % i == 0) return false;
+            if (n <= 3) return true;
+            if (n % 2 == 0 || n % 3 == 0) return false;
+            for (int i = 5; i * i <= n; i += 6) {
+                if (n % i == 0 || n % (i + 2) == 0) return false;
             }
             return true;
         }
